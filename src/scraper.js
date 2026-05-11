@@ -103,12 +103,12 @@ async function scrapeTokyoDev() {
 
   try {
     await page.goto('https://www.tokyodev.com/jobs', {
-      waitUntil: 'networkidle',
+      waitUntil: 'domcontentloaded',
       timeout: 30000,
     });
 
-    // Extra wait for any JS-rendered content
-    await page.waitForTimeout(2000);
+    // Wait for job cards to render (handles JS-heavy pages)
+    await page.waitForTimeout(3000);
 
     // ── Save debug artefacts ────────────────────────────────────────────────
     const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
