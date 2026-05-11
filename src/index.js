@@ -93,12 +93,28 @@ async function main() {
     process.exit(1);
   }
 
-  // 2. Filter
+  // 2a. Save raw jobs for debugging (always, regardless of filter outcome)
+  const outputDir = getOutputDir();
+  const rawPath = path.join(outputDir, 'raw_jobs_latest.json');
+  saveJSON(rawJobs, rawPath);
+  console.log(`🗂  Raw jobs saved → ${path.relative(process.cwd(), rawPath)}\n`);
+
+  // 2b. Print a quick preview of first 5 raw jobs
+  console.log('📋 Raw job preview (first 5):');
+  rawJobs.slice(0, 5).forEach((j, i) => {
+    console.log(`   [${i + 1}] "${j.title}" @ ${j.company} | ${j.location}`);
+    console.log(`        desc: ${(j.description || '').slice(0, 120).replace(/\n/g, ' ')}…`);
+  });
+  console.log('');
+
+  // 2c. Filter
   const filteredJobs = filterJobs(rawJobs);
   printFilterSummary(filteredJobs);
 
   if (filteredJobs.length === 0) {
-    console.log('❌ All jobs were filtered out. Adjust criteria in src/filter.js and re-run.');
+    console.log('❌ All jobs were filtered out.');
+    console.log(`   Open ${path.relative(process.cwd(), rawPath)} to see raw job data,`);
+    console.log('   then adjust REQUIRED_KEYWORDS / SENIORITY_TERMS in src/filter.js.\n');
     process.exit(1);
   }
 
@@ -121,9 +137,8 @@ async function main() {
   }
 
   // 4. Export results
-  const outputDir = getOutputDir();
-  const ts        = getTimestamp();
-  const csvPath   = path.join(outputDir, `jobs_${ts}.csv`);
+  const ts      = getTimestamp();
+  const csvPath = path.join(outputDir, `jobs_${ts}.csv`);
   const jsonPath  = path.join(outputDir, `jobs_${ts}.json`);
 
   console.log('💾 Saving results...');
