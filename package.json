@@ -1,0 +1,21 @@
+{
+  "name": "job-hunter-japan",
+  "version": "1.0.0",
+  "description": "Automated job hunting bot for tech jobs in Japan and Germany with AI-powered cover letter generation",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "node --watch src/index.js"
+  },
+  "keywords": ["job-hunting", "scraper", "claude-ai", "japan", "nodejs"],
+  "author": "Om",
+  "license": "MIT",
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.52.0",
+    "axios": "^1.7.2",
+    "cheerio": "^1.0.0",
+    "csv-writer": "^1.6.0",
+    "dotenv": "^16.4.5",
+    "node-fetch": "^2.7.0"
+  }
+}

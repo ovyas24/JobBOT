@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Environment secrets — NEVER commit this
+.env
+
+# Job results (potentially large / personal data)
+results/
+
+# macOS
+.DS_Store
+
+# Editor
+.vscode/
+.idea/
+
+# Logs
+*.log
+npm-debug.log*
