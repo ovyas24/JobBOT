@@ -209,23 +209,89 @@ async function scrapeTokyoDev() {
       }
     }
 
-    // Strategy 3: collect all job links from the page as a last resort
+    // Strategy 3: collect job URLs from the listing page, then enrich each via
+    // the detail page (JSON-LD on individual pages has full job data).
     if (results.length === 0) {
-      console.log('     ℹ️  Card selectors found nothing — collecting job links as fallback');
+      console.log('     ℹ️  Card selectors found nothing — enriching via detail pages...');
+
+      // Collect unique job URLs
+      const seen = new Set();
+      const jobUrls = [];
       $('a[href*="/jobs/"], a[href*="/companies/"]').each((_, el) => {
-        if (results.length >= MAX_PER_SOURCE) return false;
         const href = $(el).attr('href') || '';
-        const text = $(el).text().trim();
-        if (!href || !text || href === '/jobs') return;
-        const jobUrl = href.startsWith('http') ? href : `https://www.tokyodev.com${href}`;
-        results.push(makeJob({
-          title:    text,
-          company:  'See listing',
-          location: 'Tokyo, Japan',
-          jobUrl,
-          source:   'TokyoDev',
-        }));
+        if (!href || href === '/jobs' || href === '/companies') return;
+        const full = href.startsWith('http') ? href : `https://www.tokyodev.com${href}`;
+        if (!seen.has(full)) { seen.add(full); jobUrls.push(full); }
       });
+
+      const toEnrich = jobUrls.slice(0, MAX_PER_SOURCE);
+      console.log(`     🔗 Found ${jobUrls.length} job links — fetching details for ${toEnrich.length}...`);
+
+      for (const jobUrl of toEnrich) {
+        try {
+          await page.goto(jobUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+          await page.waitForTimeout(800);
+          const detailHtml = await page.content();
+          const $d = cheerio.load(detailHtml);
+
+          let enriched = false;
+
+          // Prefer JSON-LD on the detail page
+          $d('script[type="application/ld+json"]').each((_, el) => {
+            if (enriched || results.length >= MAX_PER_SOURCE) return;
+            try {
+              const data = JSON.parse($d(el).html() || '{}');
+              const items = Array.isArray(data) ? data : [data];
+              items.forEach((item) => {
+                if (item['@type'] === 'JobPosting' && !enriched) {
+                  enriched = true;
+                  const minSal = item.baseSalary?.value?.minValue;
+                  const maxSal = item.baseSalary?.value?.maxValue;
+                  const currency = item.baseSalary?.currency || '¥';
+                  results.push(makeJob({
+                    title:       item.title || '',
+                    company:     item.hiringOrganization?.name || '',
+                    location:    item.jobLocation?.address?.addressLocality ||
+                                 item.jobLocation?.address?.addressCountry || 'Tokyo, Japan',
+                    salary:      minSal ? `${currency} ${minSal}–${maxSal}` : 'Not listed',
+                    description: (item.description || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500),
+                    jobUrl,
+                    source: 'TokyoDev',
+                  }));
+                }
+              });
+            } catch { /* skip malformed */ }
+          });
+
+          // HTML fallback for the detail page
+          if (!enriched && results.length < MAX_PER_SOURCE) {
+            const title =
+              $d('h1').first().text().trim() ||
+              $d('h2').first().text().trim();
+            const company =
+              $d('[class*="company"], [class*="Company"]').first().text().trim() ||
+              $d('meta[property="og:site_name"]').attr('content') || '';
+            const description =
+              $d('meta[name="description"]').attr('content') ||
+              $d('[class*="description"]').first().text().trim() || '';
+            const salary =
+              $d('[class*="salary"], [class*="compensation"]').first().text().trim() || 'Not listed';
+
+            if (title) {
+              results.push(makeJob({ title, company, location: 'Tokyo, Japan', salary, description: description.slice(0, 500), jobUrl, source: 'TokyoDev' }));
+              enriched = true;
+            }
+          }
+
+          if (!enriched) {
+            console.warn(`     ⚠️  No data extracted from ${jobUrl}`);
+          }
+
+          await page.waitForTimeout(600); // polite delay between detail pages
+        } catch (err) {
+          console.warn(`     ⚠️  Could not load ${jobUrl}: ${err.message}`);
+        }
+      }
     }
 
   } catch (err) {

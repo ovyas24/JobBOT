@@ -90,8 +90,11 @@ function filterJobs(jobs = []) {
       return false;
     }
 
-    // Must have at least one tech stack match
-    if (countTechMatches(job) === 0) {
+    // Must have at least one tech stack match.
+    // Exception: if description is very short (detail page failed to load),
+    // let the title keywords be enough — don't discard a "Senior Node.js Engineer" listing.
+    const hasDescription = (job.description || '').length > 80;
+    if (hasDescription && countTechMatches(job) === 0) {
       return false;
     }
 
