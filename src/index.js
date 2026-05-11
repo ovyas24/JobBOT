@@ -4,21 +4,24 @@
  * Pipeline:
  *   1. Scrape Indeed JP, Indeed DE, Wantedly, Stepstone
  *   2. Filter by keywords, seniority, tech stack, exclusions
- *   3. Generate personalised cover letter snippets via Claude API
+ *   3. Generate personalised cover letter snippets via AI (Anthropic/OpenAI/Ollama)
  *   4. Export results to /results/<timestamp>.csv and .json
+ *   5. (Optional) Auto-apply via Playwright browser automation
  *
  * Run:  npm start
+ * Apply: APPLY_JOBS=true npm start
  */
 
 require('dotenv').config();
 
-const fs = require('fs');
+const fs   = require('fs');
 const path = require('path');
 const { createObjectCsvWriter } = require('csv-writer');
 
-const { scrapeAllSources } = require('./scraper');
+const { scrapeAllSources }          = require('./scraper');
 const { filterJobs, printFilterSummary } = require('./filter');
-const { addCoverLetters } = require('./claude-customizer');
+const { addCoverLetters }           = require('./claude-customizer');
+const { applyToJobs, DRY_RUN, APPLY_LIMIT } = require('./applier');
 
 // ─── Output helpers ───────────────────────────────────────────────────────────
 
@@ -62,12 +65,15 @@ function saveJSON(jobs, filePath) {
 
 // ─── Progress banner ─────────────────────────────────────────────────────────
 
-function banner() {
+function banner(applyMode) {
   console.log('');
   console.log('╔══════════════════════════════════════════╗');
   console.log('║       job-hunter-japan  🤖                ║');
   console.log('║  Senior Node.js / Microservices roles     ║');
   console.log('║  Japan  ·  Germany  ·  India              ║');
+  if (applyMode) {
+  console.log('║  ⚡ AUTO-APPLY MODE ENABLED               ║');
+  }
   console.log('╚══════════════════════════════════════════╝');
   console.log('');
 }
@@ -75,7 +81,9 @@ function banner() {
 // ─── Main ─────────────────────────────────────────────────────────────────────
 
 async function main() {
-  banner();
+  const APPLY_JOBS = process.env.APPLY_JOBS === 'true';
+
+  banner(APPLY_JOBS);
 
   // 1. Scrape
   const rawJobs = await scrapeAllSources();
@@ -94,14 +102,19 @@ async function main() {
     process.exit(1);
   }
 
-  // 3. Generate cover letters via Claude
+  // 3. Generate cover letters via AI
   let finalJobs;
-  if (!process.env.ANTHROPIC_API_KEY || process.env.ANTHROPIC_API_KEY === 'your_anthropic_api_key_here') {
-    console.log('⚠️  ANTHROPIC_API_KEY not set — skipping cover letter generation.');
-    console.log('   Set it in .env and re-run to get personalised cover letters.\n');
+  const hasAIKey =
+    (process.env.AI_PROVIDER === 'ollama') ||
+    (process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY !== 'your_anthropic_api_key_here') ||
+    (process.env.OPENAI_API_KEY    && process.env.OPENAI_API_KEY    !== 'your_openai_api_key_here');
+
+  if (!hasAIKey) {
+    console.log('⚠️  No AI provider configured — skipping cover letter generation.');
+    console.log('   Set AI_PROVIDER=ollama (free) or add an API key in .env\n');
     finalJobs = filteredJobs.map((j) => ({
       ...j,
-      coverLetter: '[Add ANTHROPIC_API_KEY to .env to generate cover letters]',
+      coverLetter: '[Configure AI_PROVIDER in .env to generate cover letters]',
     }));
   } else {
     finalJobs = await addCoverLetters(filteredJobs);
@@ -109,9 +122,9 @@ async function main() {
 
   // 4. Export results
   const outputDir = getOutputDir();
-  const ts = getTimestamp();
-  const csvPath = path.join(outputDir, `jobs_${ts}.csv`);
-  const jsonPath = path.join(outputDir, `jobs_${ts}.json`);
+  const ts        = getTimestamp();
+  const csvPath   = path.join(outputDir, `jobs_${ts}.csv`);
+  const jsonPath  = path.join(outputDir, `jobs_${ts}.json`);
 
   console.log('💾 Saving results...');
   await saveCSV(finalJobs, csvPath);
@@ -120,7 +133,7 @@ async function main() {
   // 5. Summary
   console.log('');
   console.log('╔══════════════════════════════════════════════════════════╗');
-  console.log('║  ✅  Done!                                                ║');
+  console.log('║  ✅  Scrape + filter + cover letters done!                ║');
   console.log('╠══════════════════════════════════════════════════════════╣');
   console.log(`║  Jobs found & filtered : ${String(finalJobs.length).padEnd(32)}║`);
   console.log(`║  CSV  → ${path.relative(process.cwd(), csvPath).padEnd(49)}║`);
@@ -128,10 +141,10 @@ async function main() {
   console.log('╚══════════════════════════════════════════════════════════╝');
   console.log('');
 
-  // Print a quick preview of the first result
+  // Print top match preview
   if (finalJobs.length > 0) {
     const first = finalJobs[0];
-    console.log('📌 Top match preview:');
+    console.log('📌 Top match:');
     console.log(`   Title   : ${first.title}`);
     console.log(`   Company : ${first.company}`);
     console.log(`   Location: ${first.location}`);
@@ -139,11 +152,32 @@ async function main() {
     console.log(`   Tech    : ${(first.matchedTech || []).join(', ')}`);
     if (first.coverLetter && !first.coverLetter.startsWith('[')) {
       console.log('');
-      console.log('   Cover letter snippet:');
+      console.log('   Cover letter opener:');
       console.log(`   "${first.coverLetter}"`);
     }
     console.log('');
   }
+
+  // 6. Auto-apply (only if APPLY_JOBS=true)
+  if (!APPLY_JOBS) {
+    console.log('ℹ️  Auto-apply is OFF. To enable:');
+    console.log('   APPLY_JOBS=true npm start\n');
+    console.log('   Before enabling, set in .env:');
+    console.log('   · APPLICANT_PHONE=+91xxxxxxxxxx');
+    console.log('   · RESUME_PATH=/absolute/path/to/resume.pdf');
+    console.log('   · APPLY_LIMIT=3   (max jobs per run, default 3)');
+    console.log('   · DRY_RUN=false   (default true — safe mode)');
+    console.log('   · AUTO_SUBMIT=false (default — always asks you to confirm)\n');
+    return;
+  }
+
+  // Safety check before applying
+  if (!DRY_RUN) {
+    console.log('⚠️  DRY_RUN is OFF — the bot WILL attempt real submissions.');
+    console.log(`   It will try up to ${APPLY_LIMIT} job(s) this run.\n`);
+  }
+
+  await applyToJobs(finalJobs);
 }
 
 main().catch((err) => {
