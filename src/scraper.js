@@ -101,196 +101,104 @@ async function scrapeTokyoDev() {
   });
   const page = await context.newPage();
 
+  // TokyoDev category pages pre-filter by tech stack — visit Node.js and
+  // backend pages so we only enrich relevant job postings.
+  const SEED_URLS = [
+    'https://www.tokyodev.com/jobs/nodejs',
+    'https://www.tokyodev.com/jobs/backend',
+  ];
+
   try {
-    await page.goto('https://www.tokyodev.com/jobs', {
-      waitUntil: 'domcontentloaded',
-      timeout: 30000,
-    });
+    // Collect actual job posting URLs from all seed pages.
+    // Real job URLs always match /companies/{co}/jobs/{slug} — skip bare
+    // company pages (/companies/paypay) and category pages (/jobs/python).
+    const seen = new Set();
+    const jobUrls = [];
 
-    // Wait for job cards to render (handles JS-heavy pages)
-    await page.waitForTimeout(3000);
+    for (const seedUrl of SEED_URLS) {
+      await page.goto(seedUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+      await page.waitForTimeout(2000);
 
-    // ── Save debug artefacts ────────────────────────────────────────────────
-    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-    await page.screenshot({ path: path.join(debugDir, `tokyodev_${ts}.png`), fullPage: true });
-    const rawHtml = await page.content();
-    fs.writeFileSync(path.join(debugDir, `tokyodev_${ts}.html`), rawHtml, 'utf8');
-    console.log(`     📸 Debug screenshot → results/debug/tokyodev_${ts}.png`);
+      const seedHtml = await page.content();
+      const $seed = cheerio.load(seedHtml);
 
-    // ── Parse HTML with Cheerio ─────────────────────────────────────────────
-    const $ = cheerio.load(rawHtml);
-
-    // Strategy 1: JSON-LD structured data (most reliable if present)
-    $('script[type="application/ld+json"]').each((_, el) => {
-      try {
-        const data = JSON.parse($(el).html() || '{}');
-        const items = Array.isArray(data) ? data : [data];
-        items.forEach((item) => {
-          if (item['@type'] === 'JobPosting' && results.length < MAX_PER_SOURCE) {
-            const salary = item.baseSalary
-              ? `${item.baseSalary.currency || '¥'} ${item.baseSalary.value?.minValue || ''}–${item.baseSalary.value?.maxValue || ''}`
-              : 'Not listed';
-            results.push(makeJob({
-              title:    item.title || '',
-              company:  item.hiringOrganization?.name || '',
-              location: item.jobLocation?.address?.addressLocality || 'Tokyo, Japan',
-              salary,
-              description: (item.description || '').replace(/<[^>]+>/g, '').slice(0, 400),
-              jobUrl:   item.url || 'https://www.tokyodev.com/jobs',
-              source:   'TokyoDev',
-            }));
-          }
-        });
-      } catch { /* skip malformed JSON-LD */ }
-    });
-
-    // Strategy 2: HTML card selectors — TokyoDev uses article / li job cards
-    // These selectors cover both the current design and likely redesigns.
-    if (results.length === 0) {
-      const cardSelectors = [
-        'article[class*="job"]',
-        'li[class*="job"]',
-        'div[class*="job-listing"]',
-        'div[class*="JobListing"]',
-        'div[class*="job_listing"]',
-        '[data-job-id]',
-        'article',   // broad fallback
-      ];
-
-      let cards = null;
-      for (const sel of cardSelectors) {
-        const found = $(sel);
-        if (found.length > 0) {
-          cards = found;
-          console.log(`     Using selector: ${sel} (${found.length} elements)`);
-          break;
+      $seed('a[href]').each((_, el) => {
+        const href = $seed(el).attr('href') || '';
+        // Must contain BOTH /companies/ AND /jobs/ → "/companies/acme/jobs/backend-dev"
+        if (href.includes('/companies/') && href.includes('/jobs/')) {
+          const full = href.startsWith('http') ? href : `https://www.tokyodev.com${href}`;
+          if (!seen.has(full)) { seen.add(full); jobUrls.push(full); }
         }
-      }
-
-      if (cards && cards.length > 0) {
-        cards.each((_, el) => {
-          if (results.length >= MAX_PER_SOURCE) return false;
-
-          // Title: first h2/h3, or element with "title" in its class
-          const title =
-            $(el).find('h2, h3').first().text().trim() ||
-            $(el).find('[class*="title"]').first().text().trim();
-
-          // Company: element with "company" in class, or first <p>/<span> after title
-          const company =
-            $(el).find('[class*="company"], [class*="Company"]').first().text().trim() ||
-            $(el).find('p, span').first().text().trim();
-
-          // Location: "Remote", "Tokyo", etc.
-          const location =
-            $(el).find('[class*="location"], [class*="Location"], [class*="remote"]').first().text().trim() ||
-            'Tokyo, Japan';
-
-          // Salary
-          const salary =
-            $(el).find('[class*="salary"], [class*="Salary"], [class*="compensation"]').first().text().trim() ||
-            'Not listed';
-
-          // Description / tech tags
-          const description =
-            $(el).find('[class*="description"], [class*="tag"], p').first().text().trim();
-
-          // Job URL — prefer the card's own anchor
-          const relHref = $(el).find('a[href*="/jobs"], a[href*="/companies"]').first().attr('href') ||
-            $(el).find('a').first().attr('href') || '';
-          const jobUrl = relHref.startsWith('http')
-            ? relHref
-            : `https://www.tokyodev.com${relHref}`;
-
-          if (!title) return;
-
-          results.push(makeJob({ title, company: company || 'Unknown', location, salary, description, jobUrl, source: 'TokyoDev' }));
-        });
-      }
+      });
     }
 
-    // Strategy 3: collect job URLs from the listing page, then enrich each via
-    // the detail page (JSON-LD on individual pages has full job data).
-    if (results.length === 0) {
-      console.log('     ℹ️  Card selectors found nothing — enriching via detail pages...');
+    console.log(`     🔗 Found ${jobUrls.length} real job postings across seed pages`);
 
-      // Collect unique job URLs
-      const seen = new Set();
-      const jobUrls = [];
-      $('a[href*="/jobs/"], a[href*="/companies/"]').each((_, el) => {
-        const href = $(el).attr('href') || '';
-        if (!href || href === '/jobs' || href === '/companies') return;
-        const full = href.startsWith('http') ? href : `https://www.tokyodev.com${href}`;
-        if (!seen.has(full)) { seen.add(full); jobUrls.push(full); }
-      });
+    // Save debug screenshot of the last seed page
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    await page.screenshot({ path: path.join(debugDir, `tokyodev_${ts}.png`), fullPage: true });
+    console.log(`     📸 Debug screenshot → results/debug/tokyodev_${ts}.png`);
 
-      const toEnrich = jobUrls.slice(0, MAX_PER_SOURCE);
-      console.log(`     🔗 Found ${jobUrls.length} job links — fetching details for ${toEnrich.length}...`);
+    // ── Enrich each real job URL via its detail page ───────────────────────
+    const toEnrich = jobUrls.slice(0, MAX_PER_SOURCE);
+    console.log(`     🔎 Enriching ${toEnrich.length} job detail pages...\n`);
 
-      for (const jobUrl of toEnrich) {
-        try {
-          await page.goto(jobUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
-          await page.waitForTimeout(800);
-          const detailHtml = await page.content();
-          const $d = cheerio.load(detailHtml);
+    for (const jobUrl of toEnrich) {
+      try {
+        await page.goto(jobUrl, { waitUntil: 'domcontentloaded', timeout: 20000 });
+        await page.waitForTimeout(800);
+        const detailHtml = await page.content();
+        const $d = cheerio.load(detailHtml);
 
-          let enriched = false;
+        let enriched = false;
 
-          // Prefer JSON-LD on the detail page
-          $d('script[type="application/ld+json"]').each((_, el) => {
-            if (enriched || results.length >= MAX_PER_SOURCE) return;
-            try {
-              const data = JSON.parse($d(el).html() || '{}');
-              const items = Array.isArray(data) ? data : [data];
-              items.forEach((item) => {
-                if (item['@type'] === 'JobPosting' && !enriched) {
-                  enriched = true;
-                  const minSal = item.baseSalary?.value?.minValue;
-                  const maxSal = item.baseSalary?.value?.maxValue;
-                  const currency = item.baseSalary?.currency || '¥';
-                  results.push(makeJob({
-                    title:       item.title || '',
-                    company:     item.hiringOrganization?.name || '',
-                    location:    item.jobLocation?.address?.addressLocality ||
-                                 item.jobLocation?.address?.addressCountry || 'Tokyo, Japan',
-                    salary:      minSal ? `${currency} ${minSal}–${maxSal}` : 'Not listed',
-                    description: (item.description || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 500),
-                    jobUrl,
-                    source: 'TokyoDev',
-                  }));
-                }
-              });
-            } catch { /* skip malformed */ }
-          });
+        // Prefer JSON-LD — TokyoDev embeds full JobPosting schema on detail pages
+        $d('script[type="application/ld+json"]').each((_, el) => {
+          if (enriched || results.length >= MAX_PER_SOURCE) return;
+          try {
+            const data = JSON.parse($d(el).html() || '{}');
+            const items = Array.isArray(data) ? data : [data];
+            items.forEach((item) => {
+              if (item['@type'] === 'JobPosting' && !enriched) {
+                enriched = true;
+                const minSal = item.baseSalary?.value?.minValue;
+                const maxSal = item.baseSalary?.value?.maxValue;
+                const currency = item.baseSalary?.currency || 'JPY';
+                results.push(makeJob({
+                  title:       item.title || '',
+                  company:     item.hiringOrganization?.name || '',
+                  location:    item.jobLocation?.address?.addressLocality ||
+                               item.jobLocation?.address?.addressCountry || 'Tokyo, Japan',
+                  salary:      minSal ? `${currency} ${minSal}–${maxSal}` : 'Not listed',
+                  description: (item.description || '').replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 600),
+                  jobUrl,
+                  source: 'TokyoDev',
+                }));
+              }
+            });
+          } catch { /* skip malformed */ }
+        });
 
-          // HTML fallback for the detail page
-          if (!enriched && results.length < MAX_PER_SOURCE) {
-            const title =
-              $d('h1').first().text().trim() ||
-              $d('h2').first().text().trim();
-            const company =
-              $d('[class*="company"], [class*="Company"]').first().text().trim() ||
-              $d('meta[property="og:site_name"]').attr('content') || '';
-            const description =
-              $d('meta[name="description"]').attr('content') ||
-              $d('[class*="description"]').first().text().trim() || '';
-            const salary =
-              $d('[class*="salary"], [class*="compensation"]').first().text().trim() || 'Not listed';
-
-            if (title) {
-              results.push(makeJob({ title, company, location: 'Tokyo, Japan', salary, description: description.slice(0, 500), jobUrl, source: 'TokyoDev' }));
-              enriched = true;
-            }
+        // HTML fallback
+        if (!enriched && results.length < MAX_PER_SOURCE) {
+          const title    = $d('h1').first().text().trim() || $d('h2').first().text().trim();
+          const company  = $d('meta[property="og:site_name"]').attr('content') ||
+                           $d('[class*="company"]').first().text().trim() || '';
+          const descMeta = $d('meta[name="description"]').attr('content') || '';
+          const descBody = $d('main p').first().text().trim() || '';
+          const salary   = $d('[class*="salary"]').first().text().trim() || 'Not listed';
+          if (title) {
+            results.push(makeJob({ title, company, location: 'Tokyo, Japan', salary,
+              description: (descMeta || descBody).slice(0, 600), jobUrl, source: 'TokyoDev' }));
+            enriched = true;
           }
-
-          if (!enriched) {
-            console.warn(`     ⚠️  No data extracted from ${jobUrl}`);
-          }
-
-          await page.waitForTimeout(600); // polite delay between detail pages
-        } catch (err) {
-          console.warn(`     ⚠️  Could not load ${jobUrl}: ${err.message}`);
         }
+
+        if (!enriched) console.warn(`     ⚠️  No data: ${jobUrl}`);
+
+        await page.waitForTimeout(600);
+      } catch (err) {
+        console.warn(`     ⚠️  Could not load ${jobUrl}: ${err.message}`);
       }
     }
 
