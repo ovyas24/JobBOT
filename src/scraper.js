@@ -1,20 +1,24 @@
 /**
  * scraper.js
  * Fetches tech job listings from:
- *   - Indeed Japan  (indeed.co.jp)
- *   - Indeed Germany (de.indeed.com)
- *   - Wantedly      (wantedly.com) via public search
- *   - Stepstone     (stepstone.de)
+ *   - TokyoDev      (tokyodev.com)           ← Playwright-based, real browser
+ *   - Indeed Japan  (indeed.co.jp)           ← axios (may 403)
+ *   - Indeed Germany (de.indeed.com)         ← axios (may 403)
+ *   - Wantedly      (wantedly.com)           ← axios (may 403)
+ *   - Stepstone     (stepstone.de)           ← axios (may 403)
+ *
+ * TokyoDev uses Playwright (Chromium) to bypass bot detection.
+ * A debug screenshot + HTML dump is saved to results/debug/ on each run
+ * so you can inspect what the bot actually sees if selectors break.
  *
  * NOTE: Public job sites regularly change their HTML structure.
  *       If a scraper stops returning results, update the CSS selectors
  *       in the corresponding parse* function below.
- *
- *       For production use, consider the official Indeed Publisher API
- *       (https://publisher.indeed.com) which is more reliable.
  */
 
-const axios = require('axios');
+const fs      = require('fs');
+const path    = require('path');
+const axios   = require('axios');
 const cheerio = require('cheerio');
 
 // ─── Shared helpers ───────────────────────────────────────────────────────────
@@ -63,6 +67,175 @@ function makeJob(overrides) {
     dateFound: new Date().toISOString().split('T')[0],
     ...overrides,
   };
+}
+
+// ─── TokyoDev (Playwright) ────────────────────────────────────────────────────
+// TokyoDev blocks plain HTTP scrapers.  We use a headless Chromium browser
+// so the site sees a real browser fingerprint.
+//
+// Debug artefacts (screenshot + HTML) are saved to results/debug/ so you can
+// inspect them if the selectors stop matching after a site redesign.
+
+async function scrapeTokyoDev() {
+  console.log('  📡 Scraping TokyoDev (Playwright headless)...');
+  const results = [];
+
+  let playwright;
+  try {
+    playwright = require('playwright');
+  } catch {
+    console.warn('     ⚠️  Playwright not installed — skipping TokyoDev.');
+    console.warn('        Run: npm install playwright && npx playwright install chromium');
+    return results;
+  }
+
+  const debugDir = path.resolve(process.env.OUTPUT_DIR || 'results', 'debug');
+  if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
+
+  const browser = await playwright.chromium.launch({ headless: true });
+  const context = await browser.newContext({
+    userAgent:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) ' +
+      'AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    locale: 'en-US',
+  });
+  const page = await context.newPage();
+
+  try {
+    await page.goto('https://www.tokyodev.com/jobs', {
+      waitUntil: 'networkidle',
+      timeout: 30000,
+    });
+
+    // Extra wait for any JS-rendered content
+    await page.waitForTimeout(2000);
+
+    // ── Save debug artefacts ────────────────────────────────────────────────
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    await page.screenshot({ path: path.join(debugDir, `tokyodev_${ts}.png`), fullPage: true });
+    const rawHtml = await page.content();
+    fs.writeFileSync(path.join(debugDir, `tokyodev_${ts}.html`), rawHtml, 'utf8');
+    console.log(`     📸 Debug screenshot → results/debug/tokyodev_${ts}.png`);
+
+    // ── Parse HTML with Cheerio ─────────────────────────────────────────────
+    const $ = cheerio.load(rawHtml);
+
+    // Strategy 1: JSON-LD structured data (most reliable if present)
+    $('script[type="application/ld+json"]').each((_, el) => {
+      try {
+        const data = JSON.parse($(el).html() || '{}');
+        const items = Array.isArray(data) ? data : [data];
+        items.forEach((item) => {
+          if (item['@type'] === 'JobPosting' && results.length < MAX_PER_SOURCE) {
+            const salary = item.baseSalary
+              ? `${item.baseSalary.currency || '¥'} ${item.baseSalary.value?.minValue || ''}–${item.baseSalary.value?.maxValue || ''}`
+              : 'Not listed';
+            results.push(makeJob({
+              title:    item.title || '',
+              company:  item.hiringOrganization?.name || '',
+              location: item.jobLocation?.address?.addressLocality || 'Tokyo, Japan',
+              salary,
+              description: (item.description || '').replace(/<[^>]+>/g, '').slice(0, 400),
+              jobUrl:   item.url || 'https://www.tokyodev.com/jobs',
+              source:   'TokyoDev',
+            }));
+          }
+        });
+      } catch { /* skip malformed JSON-LD */ }
+    });
+
+    // Strategy 2: HTML card selectors — TokyoDev uses article / li job cards
+    // These selectors cover both the current design and likely redesigns.
+    if (results.length === 0) {
+      const cardSelectors = [
+        'article[class*="job"]',
+        'li[class*="job"]',
+        'div[class*="job-listing"]',
+        'div[class*="JobListing"]',
+        'div[class*="job_listing"]',
+        '[data-job-id]',
+        'article',   // broad fallback
+      ];
+
+      let cards = null;
+      for (const sel of cardSelectors) {
+        const found = $(sel);
+        if (found.length > 0) {
+          cards = found;
+          console.log(`     Using selector: ${sel} (${found.length} elements)`);
+          break;
+        }
+      }
+
+      if (cards && cards.length > 0) {
+        cards.each((_, el) => {
+          if (results.length >= MAX_PER_SOURCE) return false;
+
+          // Title: first h2/h3, or element with "title" in its class
+          const title =
+            $(el).find('h2, h3').first().text().trim() ||
+            $(el).find('[class*="title"]').first().text().trim();
+
+          // Company: element with "company" in class, or first <p>/<span> after title
+          const company =
+            $(el).find('[class*="company"], [class*="Company"]').first().text().trim() ||
+            $(el).find('p, span').first().text().trim();
+
+          // Location: "Remote", "Tokyo", etc.
+          const location =
+            $(el).find('[class*="location"], [class*="Location"], [class*="remote"]').first().text().trim() ||
+            'Tokyo, Japan';
+
+          // Salary
+          const salary =
+            $(el).find('[class*="salary"], [class*="Salary"], [class*="compensation"]').first().text().trim() ||
+            'Not listed';
+
+          // Description / tech tags
+          const description =
+            $(el).find('[class*="description"], [class*="tag"], p').first().text().trim();
+
+          // Job URL — prefer the card's own anchor
+          const relHref = $(el).find('a[href*="/jobs"], a[href*="/companies"]').first().attr('href') ||
+            $(el).find('a').first().attr('href') || '';
+          const jobUrl = relHref.startsWith('http')
+            ? relHref
+            : `https://www.tokyodev.com${relHref}`;
+
+          if (!title) return;
+
+          results.push(makeJob({ title, company: company || 'Unknown', location, salary, description, jobUrl, source: 'TokyoDev' }));
+        });
+      }
+    }
+
+    // Strategy 3: collect all job links from the page as a last resort
+    if (results.length === 0) {
+      console.log('     ℹ️  Card selectors found nothing — collecting job links as fallback');
+      $('a[href*="/jobs/"], a[href*="/companies/"]').each((_, el) => {
+        if (results.length >= MAX_PER_SOURCE) return false;
+        const href = $(el).attr('href') || '';
+        const text = $(el).text().trim();
+        if (!href || !text || href === '/jobs') return;
+        const jobUrl = href.startsWith('http') ? href : `https://www.tokyodev.com${href}`;
+        results.push(makeJob({
+          title:    text,
+          company:  'See listing',
+          location: 'Tokyo, Japan',
+          jobUrl,
+          source:   'TokyoDev',
+        }));
+      });
+    }
+
+  } catch (err) {
+    console.warn(`     ⚠️  TokyoDev scrape error: ${err.message}`);
+  } finally {
+    await browser.close();
+  }
+
+  console.log(`     ✅ TokyoDev: ${results.length} jobs found`);
+  return results;
 }
 
 // ─── Indeed Japan ─────────────────────────────────────────────────────────────
@@ -377,12 +550,18 @@ function getSampleJobs() {
 // ─── Main export ──────────────────────────────────────────────────────────────
 
 async function scrapeAllSources() {
-  console.log('\n🔍 Starting job scraping across all sources...\n');
+  console.log('\n🔍 Starting job scraping across all sources...');
+  console.log('   Primary: TokyoDev (Playwright) | Fallbacks: Indeed JP/DE, Wantedly, Stepstone\n');
 
   const keywords = 'Node.js backend microservices senior';
   const allJobs = [];
 
-  // Japan sources
+  // Japan — TokyoDev first (Playwright, most reliable for Japan dev jobs)
+  const tokyoDev = await scrapeTokyoDev();
+  allJobs.push(...tokyoDev);
+  await sleep(REQUEST_DELAY_MS);
+
+  // Japan — fallback axios scrapers (may 403, but worth trying)
   const indeedJP = await scrapeIndeedJapan(keywords);
   allJobs.push(...indeedJP);
   await sleep(REQUEST_DELAY_MS);
