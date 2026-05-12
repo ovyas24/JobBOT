@@ -263,4 +263,55 @@ async function prepareApplications(jobs) {
   return result;
 }
 
-module.exports = { filterJobsWithAI, prepareApplications, CANDIDATE, PROVIDER };
+// ─── Stage 3: Resume Tailoring ────────────────────────────────────────────────
+
+const RESUME_PROMPT = (job, resumeText) => `
+You are a professional resume writer. Tailor ${CANDIDATE.name}'s resume specifically for this job.
+
+TARGET JOB:
+- Title: ${job.title}
+- Company: ${job.company}
+- Location: ${job.location}
+- AI Match Score: ${job.aiScore}/10
+- Matched Skills: ${(job.matchedSkills || []).join(', ')}
+- Description: ${(job.description || job.rawText || '').slice(0, 800)}
+
+ORIGINAL RESUME:
+${resumeText}
+
+TASK: Produce a tailored version of this resume optimised for the target job above.
+
+Rules:
+1. Rewrite the SUMMARY to directly reference this company/role (mention company name, key requirement)
+2. Reorder the SKILLS section — put the skills most relevant to this job first
+3. Add 1-2 tailored bullet points under the most relevant experience (do not fabricate — rephrase existing achievements using the job's language)
+4. Keep all dates, companies, education exactly as-is
+5. Add a "WHY ${(job.company || 'THIS COMPANY').toUpperCase()}" section (2 sentences) at the top after the summary
+6. Output clean Markdown — use ## for sections, **bold** for job titles
+
+Return ONLY the tailored resume in Markdown. No commentary outside the resume.`.trim();
+
+async function tailorResume(jobs, resumeText) {
+  if (!resumeText || jobs.length === 0) return jobs;
+
+  console.log(`\n📄 Tailoring resume for ${jobs.length} matched job(s)...\n`);
+
+  const result = [];
+  for (let i = 0; i < jobs.length; i++) {
+    const job = jobs[i];
+    console.log(`  [${i + 1}/${jobs.length}] ${job.title} @ ${job.company}`);
+    try {
+      const tailored = await callAI(RESUME_PROMPT(job, resumeText), 2000);
+      result.push({ ...job, tailoredResume: tailored });
+      const wordCount = tailored.split(/\s+/).length;
+      console.log(`     ✅ Tailored resume ready (${wordCount} words)`);
+    } catch (err) {
+      console.warn(`     ⚠️  Resume tailoring failed: ${err.message}`);
+      result.push({ ...job, tailoredResume: null });
+    }
+    await new Promise(r => setTimeout(r, 600));
+  }
+  return result;
+}
+
+module.exports = { filterJobsWithAI, prepareApplications, tailorResume, CANDIDATE, PROVIDER };

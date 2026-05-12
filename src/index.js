@@ -20,7 +20,7 @@ const path = require('path');
 const { createObjectCsvWriter } = require('csv-writer');
 
 const { scrapeAllSources }               = require('./scraper');
-const { filterJobsWithAI, prepareApplications, CANDIDATE, PROVIDER } = require('./ai-agent');
+const { filterJobsWithAI, prepareApplications, tailorResume, CANDIDATE, PROVIDER } = require('./ai-agent');
 const { applyToJobs, DRY_RUN, APPLY_LIMIT } = require('./applier');
 
 // ─── Output helpers ───────────────────────────────────────────────────────────
@@ -117,14 +117,44 @@ async function main() {
   // ── 3. AI Application Package ──────────────────────────────────────────────
   const preparedJobs = await prepareApplications(matchedJobs);
 
+  // ── 3b. AI Resume Tailoring (if resume.txt / RESUME_TEXT_PATH exists) ──────
+  const resumeTextPath = process.env.RESUME_TEXT_PATH ||
+                         path.resolve(__dirname, '..', 'resume.txt');
+  let resumeText = null;
+  if (fs.existsSync(resumeTextPath)) {
+    resumeText = fs.readFileSync(resumeTextPath, 'utf8');
+    console.log(`📄 Resume loaded from ${path.relative(process.cwd(), resumeTextPath)}`);
+  } else {
+    console.log('ℹ️  No resume.txt found — skipping resume tailoring.');
+    console.log('   Add your resume to resume.txt (plain text) to enable this feature.\n');
+  }
+
+  const finalJobs = resumeText
+    ? await tailorResume(preparedJobs, resumeText)
+    : preparedJobs;
+
+  // Save individual tailored resumes to results/resumes/
+  if (resumeText) {
+    const resumeDir = path.join(outputDir, 'resumes');
+    if (!fs.existsSync(resumeDir)) fs.mkdirSync(resumeDir, { recursive: true });
+    finalJobs.forEach(job => {
+      if (!job.tailoredResume) return;
+      const slug = `${job.company || 'unknown'}_${job.title}`
+        .toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 60);
+      const filePath = path.join(resumeDir, `resume_${slug}.md`);
+      fs.writeFileSync(filePath, job.tailoredResume, 'utf8');
+    });
+    console.log(`\n📁 Tailored resumes saved → results/resumes/ (${finalJobs.filter(j => j.tailoredResume).length} files)\n`);
+  }
+
   // ── 4. Export ──────────────────────────────────────────────────────────────
   const stamp    = ts();
   const csvPath  = path.join(outputDir, `jobs_${stamp}.csv`);
   const jsonPath = path.join(outputDir, `jobs_${stamp}.json`);
 
   console.log('💾 Saving results...');
-  await saveCSV(preparedJobs, csvPath);
-  saveJSON(preparedJobs, jsonPath);
+  await saveCSV(finalJobs, csvPath);
+  saveJSON(finalJobs, jsonPath);
 
   // ── Summary ────────────────────────────────────────────────────────────────
   console.log('');
@@ -159,7 +189,7 @@ async function main() {
   }
 
   // Pass cover letter into the field applier expects
-  const applyReady = preparedJobs.map(j => ({
+  const applyReady = finalJobs.map(j => ({
     ...j,
     coverLetter: j.applicationPackage?.coverLetter || '',
   }));

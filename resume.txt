@@ -1,0 +1,68 @@
+Om Prakash Vyas
+Lead Software Engineer
+Faridabad, Haryana, India
+Email: ovyas24@gmail.com
+LinkedIn: https://www.linkedin.com/in/om-prakash-vyas-68b9a2160
+
+SUMMARY
+Software engineer with 5+ years of experience building production-grade backend systems,
+APIs, and real-time applications. Currently Lead Software Engineer at Instavans (logistics tech),
+where I grew from intern to lead — owning architecture, engineering decisions, and a team of
+cross-functional engineers. Strong background in Node.js microservices, MongoDB, REST/GraphQL
+APIs, Next.js, and cloud infrastructure. Passionate about solving real-world problems at scale.
+
+EXPERIENCE
+
+Instavans — 5 years 1 month
+Lead Software Engineer | January 2024 – Present
+- Lead software architecture and engineering decisions for Instavans logistics platform
+- Built real-time vehicle tracking system processing live GPS and logistics data
+- Designed and optimised routing algorithm for last-mile delivery efficiency
+- Integrated machine learning models for demand forecasting and dynamic pricing
+- Collaborated with product managers and clients to deliver high-quality software
+- Mentored junior engineers and drove best practices across the team
+
+Software Engineer | August 2021 – January 2024 (Karnataka, India)
+- Developed core backend services for logistics management system
+- Built and maintained REST APIs serving mobile and web clients
+- Contributed to system design and database architecture (MongoDB)
+- Worked across full stack: Node.js backend, React/Next.js frontend
+
+Junior Dev Intern | May 2021 – July 2021
+- Onboarded onto codebase, delivered features under senior guidance
+
+Trilyo | October 2020 – February 2021 (5 months)
+Node.js Developer
+- Built middleware APIs in Node.js connecting chat service clients to backend systems
+- Designed efficient API flows for chatbot integrations
+- Trilyo is a chatbot service company; role focused on backend API development
+
+LogicsBar | February 2021 – April 2021 (3 months, Remote)
+Node.js Developer
+- Built REST APIs for web services provided by the company
+
+Pathshala | September 2020 – October 2020 (2 months, Mumbai)
+Web Developer
+- Developed web application features as a full-stack developer
+
+Freelance Web Developer | July 2020 – August 2021 (1 year 2 months, Faridabad)
+- Delivered web development projects for multiple clients
+- Full-stack development with Node.js and React
+
+SKILLS
+Languages:    JavaScript (Node.js), Python, TypeScript
+Backend:      Node.js, Express.js, REST APIs, GraphQL, Microservices
+Frontend:     React, Next.js, HTML/CSS
+Databases:    MongoDB, SQL
+DevOps/Cloud: Docker, AWS, Git
+Other:        Machine Learning integration, Real-time systems, Routing algorithms
+
+EDUCATION
+Maharshi Dayanand University
+BCA, Computer Programming | 2018 – 2021
+
+CERTIFICATIONS
+- Python for Data Science and Data Analysis Masterclass (2020)
+- IT Academy: Software Defined Storage Concepts (VMware)
+- Python (HackerRank)
+- Intro to Machine Learning (Kaggle)
