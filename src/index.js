@@ -21,6 +21,7 @@ const { createObjectCsvWriter } = require('csv-writer');
 
 const { scrapeAllSources }               = require('./scraper');
 const { filterJobsWithAI, prepareApplications, tailorResume, CANDIDATE, PROVIDER } = require('./ai-agent');
+const { generateAllPDFs }               = require('./resume-pdf');
 const { applyToJobs, DRY_RUN, APPLY_LIMIT } = require('./applier');
 
 // ─── Output helpers ───────────────────────────────────────────────────────────
@@ -143,18 +144,10 @@ async function main() {
     ? await tailorResume(preparedJobs, resumeText)
     : preparedJobs;
 
-  // Save individual tailored resumes to results/resumes/
+  // Generate ATS-optimised PDF resumes (one per matched job)
   if (resumeText) {
     const resumeDir = path.join(outputDir, 'resumes');
-    if (!fs.existsSync(resumeDir)) fs.mkdirSync(resumeDir, { recursive: true });
-    finalJobs.forEach(job => {
-      if (!job.tailoredResume) return;
-      const slug = `${job.company || 'unknown'}_${job.title}`
-        .toLowerCase().replace(/[^a-z0-9]+/g, '_').slice(0, 60);
-      const filePath = path.join(resumeDir, `resume_${slug}.md`);
-      fs.writeFileSync(filePath, job.tailoredResume, 'utf8');
-    });
-    console.log(`\n📁 Tailored resumes saved → results/resumes/ (${finalJobs.filter(j => j.tailoredResume).length} files)\n`);
+    await generateAllPDFs(finalJobs, resumeDir);
   }
 
   // ── 4. Export ──────────────────────────────────────────────────────────────
