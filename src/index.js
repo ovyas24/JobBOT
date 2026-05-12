@@ -104,8 +104,18 @@ async function main() {
     process.exit(1);
   }
 
+  // ── 1b. Pre-filter obvious junk before spending AI tokens ──────────────────
+  const JUNK_TITLES = /^(humans only|join linkedin|\d[\d,+]+ .* jobs|developer jobs in|software developer jobs for|in person developer|partially remote|fully remote developer|english.friendly|^\s*$)/i;
+  const cleanJobs = rawJobs.filter(j => {
+    if (!j.title || JUNK_TITLES.test(j.title)) return false;
+    if (!j.company && !j.description) return false;  // no data at all
+    return true;
+  });
+  const removed = rawJobs.length - cleanJobs.length;
+  if (removed > 0) console.log(`🧹 Pre-filter removed ${removed} junk/empty listings → ${cleanJobs.length} remain\n`);
+
   // ── 2. AI Filter ───────────────────────────────────────────────────────────
-  const matchedJobs = await filterJobsWithAI(rawJobs);
+  const matchedJobs = await filterJobsWithAI(cleanJobs);
 
   if (matchedJobs.length === 0) {
     console.log('❌ No jobs passed the AI filter.');
