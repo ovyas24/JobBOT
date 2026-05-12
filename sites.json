@@ -1,0 +1,32 @@
+[
+  {
+    "name": "TokyoDev – Node.js",
+    "url": "https://www.tokyodev.com/jobs/nodejs",
+    "country": "Japan"
+  },
+  {
+    "name": "TokyoDev – Backend",
+    "url": "https://www.tokyodev.com/jobs/backend",
+    "country": "Japan"
+  },
+  {
+    "name": "TokyoDev – All Jobs",
+    "url": "https://www.tokyodev.com/jobs",
+    "country": "Japan"
+  },
+  {
+    "name": "Glassdoor Japan Node.js",
+    "url": "https://www.glassdoor.com/Job/japan-node-js-jobs-SRCH_IL.0,5_IN123_KO6,13.htm",
+    "country": "Japan"
+  },
+  {
+    "name": "LinkedIn Japan Backend Senior",
+    "url": "https://www.linkedin.com/jobs/search/?keywords=senior%20backend%20node.js&location=Japan",
+    "country": "Japan"
+  },
+  {
+    "name": "LinkedIn Germany Node.js Senior",
+    "url": "https://www.linkedin.com/jobs/search/?keywords=senior%20node.js%20backend&location=Germany",
+    "country": "Germany"
+  }
+]

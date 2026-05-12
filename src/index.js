@@ -1,15 +1,16 @@
 /**
- * index.js  ·  job-hunter-japan
+ * index.js  —  job-hunter-japan  (AI agent pipeline)
  *
  * Pipeline:
- *   1. Scrape Indeed JP, Indeed DE, Wantedly, Stepstone
- *   2. Filter by keywords, seniority, tech stack, exclusions
- *   3. Generate personalised cover letter snippets via AI (Anthropic/OpenAI/Ollama)
- *   4. Export results to /results/<timestamp>.csv and .json
- *   5. (Optional) Auto-apply via Playwright browser automation
+ *   1. Scrape all sites in sites.json with generic Playwright scraper
+ *   2. AI Filter  — Claude/Ollama scores each job against Om's profile
+ *   3. AI Prepare — Claude/Ollama generates full application package per job
+ *   4. Export      — CSV + JSON to results/
+ *   5. Apply       — Playwright auto-apply (opt-in via APPLY_JOBS=true)
  *
- * Run:  npm start
- * Apply: APPLY_JOBS=true npm start
+ * Run:
+ *   npm start               ← scrape + AI filter + prep
+ *   APPLY_JOBS=true npm start ← full pipeline including auto-apply
  */
 
 require('dotenv').config();
@@ -18,9 +19,8 @@ const fs   = require('fs');
 const path = require('path');
 const { createObjectCsvWriter } = require('csv-writer');
 
-const { scrapeAllSources }          = require('./scraper');
-const { filterJobs, printFilterSummary } = require('./filter');
-const { addCoverLetters }           = require('./claude-customizer');
+const { scrapeAllSources }               = require('./scraper');
+const { filterJobsWithAI, prepareApplications, CANDIDATE, PROVIDER } = require('./ai-agent');
 const { applyToJobs, DRY_RUN, APPLY_LIMIT } = require('./applier');
 
 // ─── Output helpers ───────────────────────────────────────────────────────────
@@ -31,7 +31,7 @@ function getOutputDir() {
   return dir;
 }
 
-function getTimestamp() {
+function ts() {
   return new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 }
 
@@ -39,42 +39,48 @@ async function saveCSV(jobs, filePath) {
   const writer = createObjectCsvWriter({
     path: filePath,
     header: [
-      { id: 'title',       title: 'JobTitle' },
-      { id: 'company',     title: 'Company' },
-      { id: 'location',    title: 'Location' },
-      { id: 'salary',      title: 'Salary' },
-      { id: 'jobUrl',      title: 'JobURL' },
-      { id: 'source',      title: 'Source' },
-      { id: 'matchedTech', title: 'MatchedTech' },
-      { id: 'coverLetter', title: 'CustomizedCoverLetter' },
-      { id: 'dateFound',   title: 'DateFound' },
+      { id: 'title',         title: 'JobTitle' },
+      { id: 'company',       title: 'Company' },
+      { id: 'location',      title: 'Location' },
+      { id: 'country',       title: 'Country' },
+      { id: 'salary',        title: 'Salary' },
+      { id: 'aiScore',       title: 'AIScore' },
+      { id: 'aiReason',      title: 'AIReason' },
+      { id: 'matchedSkills', title: 'MatchedSkills' },
+      { id: 'coverLetter',   title: 'CoverLetter' },
+      { id: 'emailSubject',  title: 'EmailSubject' },
+      { id: 'jobUrl',        title: 'JobURL' },
+      { id: 'source',        title: 'Source' },
+      { id: 'dateFound',     title: 'DateFound' },
     ],
   });
 
-  const rows = jobs.map((j) => ({
+  const rows = jobs.map(j => ({
     ...j,
-    matchedTech: Array.isArray(j.matchedTech) ? j.matchedTech.join(', ') : '',
+    matchedSkills: (j.matchedSkills || []).join(', '),
+    coverLetter:   j.applicationPackage?.coverLetter   || '',
+    emailSubject:  j.applicationPackage?.emailSubject  || '',
   }));
 
   await writer.writeRecords(rows);
 }
 
-function saveJSON(jobs, filePath) {
-  fs.writeFileSync(filePath, JSON.stringify(jobs, null, 2), 'utf8');
+function saveJSON(data, filePath) {
+  fs.writeFileSync(filePath, JSON.stringify(data, null, 2), 'utf8');
 }
 
-// ─── Progress banner ─────────────────────────────────────────────────────────
+// ─── Banner ───────────────────────────────────────────────────────────────────
 
 function banner(applyMode) {
   console.log('');
-  console.log('╔══════════════════════════════════════════╗');
-  console.log('║       job-hunter-japan  🤖                ║');
-  console.log('║  Senior Node.js / Microservices roles     ║');
-  console.log('║  Japan  ·  Germany  ·  India              ║');
+  console.log('╔══════════════════════════════════════════════╗');
+  console.log('║   job-hunter-japan  🤖  AI Agent Pipeline    ║');
+  console.log(`║   AI: ${(PROVIDER + ' / ' + require('./ai-agent').PROVIDER).slice(0,38).padEnd(38)}║`);
+  console.log(`║   Candidate: ${CANDIDATE.name.padEnd(31)}║`);
   if (applyMode) {
-  console.log('║  ⚡ AUTO-APPLY MODE ENABLED               ║');
+  console.log('║   ⚡ AUTO-APPLY MODE ON                       ║');
   }
-  console.log('╚══════════════════════════════════════════╝');
+  console.log('╚══════════════════════════════════════════════╝');
   console.log('');
 }
 
@@ -82,120 +88,86 @@ function banner(applyMode) {
 
 async function main() {
   const APPLY_JOBS = process.env.APPLY_JOBS === 'true';
-
   banner(APPLY_JOBS);
 
-  // 1. Scrape
+  const outputDir = getOutputDir();
+
+  // ── 1. Scrape ──────────────────────────────────────────────────────────────
   const rawJobs = await scrapeAllSources();
 
+  // Always save raw jobs for inspection
+  saveJSON(rawJobs, path.join(outputDir, 'raw_jobs_latest.json'));
+  console.log(`🗂  Raw jobs → results/raw_jobs_latest.json (${rawJobs.length} jobs)\n`);
+
   if (rawJobs.length === 0) {
-    console.log('❌ No jobs collected. Check your internet connection and try again.');
+    console.log('❌ No jobs collected. Check sites.json and your internet connection.');
     process.exit(1);
   }
 
-  // 2a. Save raw jobs for debugging (always, regardless of filter outcome)
-  const outputDir = getOutputDir();
-  const rawPath = path.join(outputDir, 'raw_jobs_latest.json');
-  saveJSON(rawJobs, rawPath);
-  console.log(`🗂  Raw jobs saved → ${path.relative(process.cwd(), rawPath)}\n`);
+  // ── 2. AI Filter ───────────────────────────────────────────────────────────
+  const matchedJobs = await filterJobsWithAI(rawJobs);
 
-  // 2b. Print a quick preview of first 5 raw jobs
-  console.log('📋 Raw job preview (first 5):');
-  rawJobs.slice(0, 5).forEach((j, i) => {
-    console.log(`   [${i + 1}] "${j.title}" @ ${j.company} | ${j.location}`);
-    console.log(`        desc: ${(j.description || '').slice(0, 120).replace(/\n/g, ' ')}…`);
-  });
-  console.log('');
-
-  // 2c. Filter
-  const filteredJobs = filterJobs(rawJobs);
-  printFilterSummary(filteredJobs);
-
-  if (filteredJobs.length === 0) {
-    console.log('❌ All jobs were filtered out.');
-    console.log(`   Open ${path.relative(process.cwd(), rawPath)} to see raw job data,`);
-    console.log('   then adjust REQUIRED_KEYWORDS / SENIORITY_TERMS in src/filter.js.\n');
+  if (matchedJobs.length === 0) {
+    console.log('❌ No jobs passed the AI filter.');
+    console.log('   Try lowering AI_FILTER_THRESHOLD in .env (default: 6)');
+    console.log('   or add more sites to sites.json.\n');
     process.exit(1);
   }
 
-  // 3. Generate cover letters via AI
-  let finalJobs;
-  const hasAIKey =
-    (process.env.AI_PROVIDER === 'ollama') ||
-    (process.env.ANTHROPIC_API_KEY && process.env.ANTHROPIC_API_KEY !== 'your_anthropic_api_key_here') ||
-    (process.env.OPENAI_API_KEY    && process.env.OPENAI_API_KEY    !== 'your_openai_api_key_here');
+  // ── 3. AI Application Package ──────────────────────────────────────────────
+  const preparedJobs = await prepareApplications(matchedJobs);
 
-  if (!hasAIKey) {
-    console.log('⚠️  No AI provider configured — skipping cover letter generation.');
-    console.log('   Set AI_PROVIDER=ollama (free) or add an API key in .env\n');
-    finalJobs = filteredJobs.map((j) => ({
-      ...j,
-      coverLetter: '[Configure AI_PROVIDER in .env to generate cover letters]',
-    }));
-  } else {
-    finalJobs = await addCoverLetters(filteredJobs);
-  }
-
-  // 4. Export results
-  const ts      = getTimestamp();
-  const csvPath = path.join(outputDir, `jobs_${ts}.csv`);
-  const jsonPath  = path.join(outputDir, `jobs_${ts}.json`);
+  // ── 4. Export ──────────────────────────────────────────────────────────────
+  const stamp    = ts();
+  const csvPath  = path.join(outputDir, `jobs_${stamp}.csv`);
+  const jsonPath = path.join(outputDir, `jobs_${stamp}.json`);
 
   console.log('💾 Saving results...');
-  await saveCSV(finalJobs, csvPath);
-  saveJSON(finalJobs, jsonPath);
+  await saveCSV(preparedJobs, csvPath);
+  saveJSON(preparedJobs, jsonPath);
 
-  // 5. Summary
+  // ── Summary ────────────────────────────────────────────────────────────────
   console.log('');
   console.log('╔══════════════════════════════════════════════════════════╗');
-  console.log('║  ✅  Scrape + filter + cover letters done!                ║');
+  console.log('║  ✅  Done!                                                ║');
   console.log('╠══════════════════════════════════════════════════════════╣');
-  console.log(`║  Jobs found & filtered : ${String(finalJobs.length).padEnd(32)}║`);
+  console.log(`║  Raw scraped        : ${String(rawJobs.length).padEnd(34)}║`);
+  const threshold = process.env.AI_FILTER_THRESHOLD || '6';
+  console.log(`║  AI matched (>=${threshold})     : ${String(matchedJobs.length).padEnd(34)}║`);
   console.log(`║  CSV  → ${path.relative(process.cwd(), csvPath).padEnd(49)}║`);
   console.log(`║  JSON → ${path.relative(process.cwd(), jsonPath).padEnd(49)}║`);
-  console.log('╚══════════════════════════════════════════════════════════╝');
-  console.log('');
+  console.log('╚══════════════════════════════════════════════════════════╝\n');
 
-  // Print top match preview
-  if (finalJobs.length > 0) {
-    const first = finalJobs[0];
-    console.log('📌 Top match:');
-    console.log(`   Title   : ${first.title}`);
-    console.log(`   Company : ${first.company}`);
-    console.log(`   Location: ${first.location}`);
-    console.log(`   Salary  : ${first.salary}`);
-    console.log(`   Tech    : ${(first.matchedTech || []).join(', ')}`);
-    if (first.coverLetter && !first.coverLetter.startsWith('[')) {
-      console.log('');
-      console.log('   Cover letter opener:');
-      console.log(`   "${first.coverLetter}"`);
+  // Preview top match
+  if (preparedJobs.length > 0) {
+    const top = preparedJobs[0];
+    console.log(`📌 Top match: ${top.title} @ ${top.company}  [AI score: ${top.aiScore}/10]`);
+    console.log(`   ${top.aiReason}`);
+    const cl = top.applicationPackage?.coverLetter;
+    if (cl) {
+      console.log('\n   Cover letter (first paragraph):');
+      console.log('   ' + cl.split('\n')[0]);
     }
     console.log('');
   }
 
-  // 6. Auto-apply (only if APPLY_JOBS=true)
+  // ── 5. Auto-Apply (opt-in) ─────────────────────────────────────────────────
   if (!APPLY_JOBS) {
-    console.log('ℹ️  Auto-apply is OFF. To enable:');
-    console.log('   APPLY_JOBS=true npm start\n');
-    console.log('   Before enabling, set in .env:');
-    console.log('   · APPLICANT_PHONE=+91xxxxxxxxxx');
-    console.log('   · RESUME_PATH=/absolute/path/to/resume.pdf');
-    console.log('   · APPLY_LIMIT=3   (max jobs per run, default 3)');
-    console.log('   · DRY_RUN=false   (default true — safe mode)');
-    console.log('   · AUTO_SUBMIT=false (default — always asks you to confirm)\n');
+    console.log('ℹ️  Auto-apply is OFF.  To enable: APPLY_JOBS=true npm start');
+    console.log('   Set in .env: APPLICANT_PHONE, RESUME_PATH, APPLY_LIMIT, DRY_RUN\n');
     return;
   }
 
-  // Safety check before applying
-  if (!DRY_RUN) {
-    console.log('⚠️  DRY_RUN is OFF — the bot WILL attempt real submissions.');
-    console.log(`   It will try up to ${APPLY_LIMIT} job(s) this run.\n`);
-  }
+  // Pass cover letter into the field applier expects
+  const applyReady = preparedJobs.map(j => ({
+    ...j,
+    coverLetter: j.applicationPackage?.coverLetter || '',
+  }));
 
-  await applyToJobs(finalJobs);
+  await applyToJobs(applyReady);
 }
 
-main().catch((err) => {
+main().catch(err => {
   console.error('\n💥 Fatal error:', err.message || err);
   process.exit(1);
 });
